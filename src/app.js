@@ -56,6 +56,34 @@ export function createApp() {
         return c.json({ ok: true, store: outbox.kind || 'unknown', version: VERSION });
     });
 
+    // 🔧 临时调试端点：浏览器直接访问，验证 Worker 是否能写/读 KV + 出站请求是否可用。
+    //    GET /debug-ping  → 写一条测试 item 进 outbox(inboxId=debug) 再读回，返回结果。
+    //    确认链路后应删除。无需鉴权（仅诊断，不含敏感操作）。
+    app.get('/debug-ping', async (c) => {
+        const out = { version: VERSION, steps: {} };
+        try {
+            const { outbox } = await getStores(c.env);
+            out.steps.storeKind = outbox.kind;
+            const id = 'debug_' + nowMs();
+            await outbox.put('debug', { id, requestId: id, content: 'kv-write-ok', createdAt: nowMs() });
+            out.steps.kvPut = 'ok';
+            const items = await outbox.list('debug', 0);
+            out.steps.kvList = items.length;
+            await outbox.ack('debug', [id]);
+            out.steps.kvAck = 'ok';
+        } catch (e) {
+            out.steps.error = String(e?.message || e);
+        }
+        // 测出站请求（Worker 能不能访问外网，AI 调用的前提）
+        try {
+            const r = await fetch('https://api.openai.com/v1/models', { method: 'GET' });
+            out.steps.outboundFetch = `reachable (HTTP ${r.status})`;
+        } catch (e) {
+            out.steps.outboundFetch = 'FAILED: ' + String(e?.message || e);
+        }
+        return c.json(out);
+    });
+
     // 以下全部要鉴权
     app.use('/generate', requireSecret);
     app.use('/outbox', requireSecret);
